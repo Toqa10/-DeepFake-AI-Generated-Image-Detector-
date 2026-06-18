@@ -119,7 +119,10 @@ except Exception as e:
 def preprocess_image(pil_img):
     img = pil_img.convert('RGB').resize((64, 64), Image.LANCZOS)
     arr = np.array(img, dtype='float32').transpose(2, 0, 1) / 255.0  # (3,64,64)
-    arr = (arr - MEAN.squeeze()) / STD.squeeze()
+    # MEAN/STD shape is (1,3,1,1) — reshape to (3,1,1) for broadcasting
+    m = MEAN.reshape(3, 1, 1)
+    s = STD.reshape(3, 1, 1)
+    arr = (arr - m) / s
     return torch.tensor(arr).unsqueeze(0).float()  # (1,3,64,64)
 
 def get_fft_features(pil_img):
