@@ -1,217 +1,387 @@
-import torch, torch.nn as nn, torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, random_split
+"""
+train.py - تدريب نموذج DeepFake Detector مع تحميل الداتا أونلاين
+"""
+
+import os
+import json
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, transforms
 import numpy as np
-import matplotlib; matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve, classification_report
-import seaborn as sns, os, json, time
+from tqdm import tqdm
+import kagglehub
+from PIL import Image, ImageFilter, ImageEnhance
+import random
+from io import BytesIO
 
-os.makedirs('models', exist_ok=True)
-os.makedirs('results', exist_ok=True)
-device = torch.device('cpu')
-print(f"🖥️  Device: {device}")
+# ──────────────────────────────────────────────────────────────
+# 1. تحميل الداتا من Kaggle
+# ──────────────────────────────────────────────────────────────
 
-# ── Data ─────────────────────────────────────────────────
-print("\n📥 Loading data...")
-X_tr = np.load('data/X_train.npy')
-y_tr = np.load('data/y_train.npy').astype('int64')
-X_te = np.load('data/X_test.npy')
-y_te = np.load('data/y_test.npy').astype('int64')
+def download_dataset():
+    """تحميل الداتا من Kaggle مباشرة"""
+    print("📥 Downloading dataset from Kaggle...")
+    try:
+        path = kagglehub.dataset_download("xhlulu/140k-real-and-fake-faces")
+        print(f"✅ Dataset downloaded to: {path}")
+        return path
+    except Exception as e:
+        print(f"⚠️ Could not download: {e}")
+        print("   Using dummy data for testing...")
+        return None
 
-m = X_tr.mean(axis=(0,2,3), keepdims=True)
-s = X_tr.std( axis=(0,2,3), keepdims=True) + 1e-8
-X_tr = (X_tr-m)/s;  X_te = (X_te-m)/s
-np.save('data/norm_mean.npy', m); np.save('data/norm_std.npy', s)
+# ──────────────────────────────────────────────────────────────
+# 2. معالجة الصور (للواقعية)
+# ──────────────────────────────────────────────────────────────
 
-def fft_features(X):
-    out = []
-    for img in X:
-        chs = []
-        for c in range(3):
-            f   = np.fft.fft2(img[c])
-            mag = np.log1p(np.abs(np.fft.fftshift(f)))
-            mag = (mag-mag.min())/(mag.max()-mag.min()+1e-8)
-            chs.append(mag)
-        out.append(np.stack(chs))
-    return np.array(out, dtype='float32')
+class RealisticImageAugmenter:
+    """تطبيق تشويش واقعي عشان النموذج يتعلم على صور حقيقية"""
+    
+    def __init__(self):
+        self.augmentations = [
+            self.add_jpeg_artifacts,
+            self.add_noise,
+            self.blur_slightly,
+            self.change_brightness,
+            self.change_contrast,
+            self.add_crop_variation,
+            self.add_color_shift,
+        ]
+    
+    def add_jpeg_artifacts(self, img):
+        quality = random.randint(70, 95)
+        buffer = BytesIO()
+        img.save(buffer, format='JPEG', quality=quality)
+        return Image.open(buffer)
+    
+    def add_noise(self, img):
+        img_array = np.array(img, dtype='float32') / 255.0
+        noise = np.random.normal(0, random.uniform(0.005, 0.02), img_array.shape)
+        img_array = np.clip(img_array + noise, 0, 1) * 255
+        return Image.fromarray(img_array.astype('uint8'))
+    
+    def blur_slightly(self, img):
+        radius = random.uniform(0.3, 1.2)
+        return img.filter(ImageFilter.GaussianBlur(radius=radius))
+    
+    def change_brightness(self, img):
+        factor = random.uniform(0.8, 1.2)
+        return ImageEnhance.Brightness(img).enhance(factor)
+    
+    def change_contrast(self, img):
+        factor = random.uniform(0.8, 1.2)
+        return ImageEnhance.Contrast(img).enhance(factor)
+    
+    def add_crop_variation(self, img):
+        w, h = img.size
+        crop_factor = random.uniform(0.88, 0.98)
+        new_w, new_h = int(w * crop_factor), int(h * crop_factor)
+        left = random.randint(0, w - new_w)
+        top = random.randint(0, h - new_h)
+        cropped = img.crop((left, top, left + new_w, top + new_h))
+        return cropped.resize((w, h), Image.LANCZOS)
+    
+    def add_color_shift(self, img):
+        img_array = np.array(img)
+        for channel in range(3):
+            if random.random() < 0.3:
+                shift = random.randint(-5, 5)
+                img_array[:, :, channel] = np.clip(
+                    img_array[:, :, channel] + shift, 0, 255
+                )
+        return Image.fromarray(img_array.astype('uint8'))
+    
+    def augment(self, img, is_fake=False):
+        if is_fake:
+            num_augs = random.randint(2, 5)
+        else:
+            num_augs = random.randint(1, 3)
+        
+        selected = random.sample(self.augmentations, min(num_augs, len(self.augmentations)))
+        
+        for aug in selected:
+            if random.random() < 0.6:
+                try:
+                    img = aug(img)
+                except:
+                    pass
+        return img
 
-print("🔬 FFT features...")
-X_tr_f = fft_features(X_tr);  X_te_f = fft_features(X_te)
+# ──────────────────────────────────────────────────────────────
+# 3. تحضير البيانات مع Augmentation
+# ──────────────────────────────────────────────────────────────
 
-def make_loaders(Xp, Xf, y, val=0.1, bs=32):
-    ds = TensorDataset(torch.tensor(Xp), torch.tensor(Xf), torch.tensor(y))
-    nv = int(len(ds)*val)
-    tr,va = random_split(ds,[len(ds)-nv,nv],generator=torch.Generator().manual_seed(42))
-    return DataLoader(tr,bs,shuffle=True), DataLoader(va,bs)
+class RealisticDataset:
+    """كلاس مخصص لقراءة الصور مع تطبيق التشويش"""
+    
+    def __init__(self, data_path, transform=None, augment=True):
+        self.data_path = data_path
+        self.transform = transform
+        self.augment = augment
+        self.augmenter = RealisticImageAugmenter()
+        self.images = []
+        self.labels = []
+        
+        # قراءة الصور من مجلدات real و fake
+        for label, folder in enumerate(['real', 'fake']):
+            folder_path = os.path.join(data_path, folder)
+            if os.path.exists(folder_path):
+                for img_name in os.listdir(folder_path):
+                    if img_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        self.images.append(os.path.join(folder_path, img_name))
+                        self.labels.append(label)
+        
+        print(f"📊 Loaded {len(self.images)} images")
+        print(f"   REAL: {self.labels.count(0)}, FAKE: {self.labels.count(1)}")
+    
+    def __len__(self):
+        return len(self.images)
+    
+    def __getitem__(self, idx):
+        img_path = self.images[idx]
+        label = self.labels[idx]
+        
+        try:
+            img = Image.open(img_path).convert('RGB')
+        except:
+            img = Image.new('RGB', (64, 64), color='black')
+        
+        # تطبيق التشويش
+        if self.augment:
+            is_fake = (label == 1)
+            img = self.augmenter.augment(img, is_fake=is_fake)
+        
+        img = img.resize((64, 64), Image.LANCZOS)
+        
+        if self.transform:
+            img = self.transform(img)
+        
+        return img, label
 
-tr_ld, va_ld = make_loaders(X_tr, X_tr_f, y_tr)
-te_ds = TensorDataset(torch.tensor(X_te), torch.tensor(X_te_f), torch.tensor(y_te))
-te_ld = DataLoader(te_ds, 32)
-print(f"✅ Train:{len(tr_ld.dataset)}  Val:{len(va_ld.dataset)}  Test:{len(te_ds)}")
+def get_data_loaders(data_path, batch_size=64, use_dummy=False):
+    """
+    تحضير البيانات وتقسيمها إلى Train / Validation / Test
+    """
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], 
+                           std=[0.229, 0.224, 0.225])
+    ])
+    
+    # ── استخدام داتا حقيقية ──
+    if data_path and os.path.exists(data_path) and not use_dummy:
+        print("📊 Using real dataset...")
+        dataset = RealisticDataset(data_path, transform=transform, augment=True)
+        
+        if len(dataset) == 0:
+            print("⚠️ No images found, using dummy data")
+            return get_dummy_loaders(batch_size)
+    
+    # ── داتا وهمية للاختبار ──
+    print("📊 Using dummy data for testing...")
+    return get_dummy_loaders(batch_size)
 
-# ── Models ────────────────────────────────────────────────
+def get_dummy_loaders(batch_size):
+    """عمل داتا وهمية عشان نجرب الكود"""
+    num_train, num_val, num_test = 800, 100, 100
+    
+    train_data = torch.randn(num_train, 3, 64, 64)
+    train_labels = torch.randint(0, 2, (num_train,))
+    
+    val_data = torch.randn(num_val, 3, 64, 64)
+    val_labels = torch.randint(0, 2, (num_val,))
+    
+    test_data = torch.randn(num_test, 3, 64, 64)
+    test_labels = torch.randint(0, 2, (num_test,))
+    
+    from torch.utils.data import TensorDataset
+    
+    train_dataset = TensorDataset(train_data, train_labels)
+    val_dataset = TensorDataset(val_data, val_labels)
+    test_dataset = TensorDataset(test_data, test_labels)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    
+    return train_loader, val_loader, test_loader
+
+# ──────────────────────────────────────────────────────────────
+# 4. تعريف النموذج
+# ──────────────────────────────────────────────────────────────
+
 class PixelCNN(nn.Module):
     def __init__(self):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3,32,3,padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32,64,3,padding=1), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(64,128,3,padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.Conv2d(3, 32, 3, padding=1), 
+            nn.BatchNorm2d(32), 
+            nn.ReLU(), 
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, 3, padding=1), 
+            nn.BatchNorm2d(64), 
+            nn.ReLU(), 
+            nn.MaxPool2d(2),
+            nn.Conv2d(64, 128, 3, padding=1), 
+            nn.BatchNorm2d(128), 
+            nn.ReLU(),
             nn.AdaptiveAvgPool2d(4),
         )
         self.clf = nn.Sequential(
-            nn.Flatten(), nn.Linear(128*16,256), nn.ReLU(), nn.Dropout(0.4),
-            nn.Linear(256,64), nn.ReLU(), nn.Linear(64,2)
+            nn.Flatten(), 
+            nn.Linear(128 * 16, 256), 
+            nn.ReLU(), 
+            nn.Dropout(0.4),
+            nn.Linear(256, 64), 
+            nn.ReLU(), 
+            nn.Linear(64, 2)
         )
-    def forward(self,x): return self.clf(self.features(x))
+    
+    def forward(self, x):
+        return self.clf(self.features(x))
 
-class FreqCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3,32,3,padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32,64,3,padding=1), nn.BatchNorm2d(64), nn.ReLU(),
-            nn.AdaptiveAvgPool2d(4),
-        )
-        self.clf = nn.Sequential(
-            nn.Flatten(), nn.Linear(64*16,128), nn.ReLU(), nn.Dropout(0.3),
-            nn.Linear(128,2)
-        )
-    def forward(self,x): return self.clf(self.features(x))
+# ──────────────────────────────────────────────────────────────
+# 5. التدريب والتقييم
+# ──────────────────────────────────────────────────────────────
 
-class Ensemble(nn.Module):
-    def __init__(self,p,f):
-        super().__init__()
-        self.pixel=p; self.freq=f
-        self.fusion=nn.Sequential(nn.Linear(4,32),nn.ReLU(),nn.Linear(32,2))
-    def forward(self,xp,xf):
-        return self.fusion(torch.cat([self.pixel(xp),self.freq(xf)],dim=1))
-
-pixel_m = PixelCNN().to(device)
-freq_m  = FreqCNN().to(device)
-
-# ── Train ─────────────────────────────────────────────────
-def train_one(model, use_freq, save_path, epochs=15, name=""):
-    crit = nn.CrossEntropyLoss(label_smoothing=0.05)
-    opt  = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    sch  = optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
-    hist = {'tl':[],'ta':[],'vl':[],'va':[]}
-    best = 0
-    print(f"\n🚀 {name}  ({epochs} epochs)")
-    print(f"{'Ep':>3}|{'TrL':>7}|{'TrA':>6}|{'VaL':>7}|{'VaA':>6}")
-    print("─"*36)
-    for ep in range(1,epochs+1):
-        model.train()
-        tl=tc=tt=0
-        for xp,xf,yb in tr_ld:
-            xp,xf,yb=xp.to(device),xf.to(device),yb.to(device)
-            out=model(xf if use_freq else xp)
-            loss=crit(out,yb)
-            opt.zero_grad();loss.backward();nn.utils.clip_grad_norm_(model.parameters(),1);opt.step()
-            tl+=loss.item()*yb.size(0);tc+=(out.argmax(1)==yb).sum().item();tt+=yb.size(0)
-        sch.step()
-        model.eval(); vl=vc=vt=0
-        with torch.no_grad():
-            for xp,xf,yb in va_ld:
-                xp,xf,yb=xp.to(device),xf.to(device),yb.to(device)
-                out=model(xf if use_freq else xp);loss=crit(out,yb)
-                vl+=loss.item()*yb.size(0);vc+=(out.argmax(1)==yb).sum().item();vt+=yb.size(0)
-        ta,va_=100*tc/tt,100*vc/vt
-        hist['tl'].append(tl/tt);hist['ta'].append(ta)
-        hist['vl'].append(vl/vt);hist['va'].append(va_)
-        star=''
-        if va_>best: best=va_; torch.save(model.state_dict(),save_path); star=' 💾'
-        if ep%5==0 or ep==1:
-            print(f"{ep:>3}|{tl/tt:>7.4f}|{ta:>5.1f}%|{vl/vt:>7.4f}|{va_:>5.1f}%{star}")
-    print(f"✅ Best: {best:.2f}%")
-    return hist, best
-
-h_px, b_px = train_one(pixel_m, False, 'models/pixel.pth', 15, "PixelCNN")
-h_fx, b_fx = train_one(freq_m,  True,  'models/freq.pth',  15, "FreqCNN")
-
-pixel_m.load_state_dict(torch.load('models/pixel.pth', map_location=device, weights_only=True))
-freq_m.load_state_dict( torch.load('models/freq.pth',  map_location=device, weights_only=True))
-
-# Ensemble
-print("\n🚀 Ensemble fusion...")
-ens = Ensemble(pixel_m, freq_m).to(device)
-for p in ens.pixel.parameters(): p.requires_grad=False
-for p in ens.freq.parameters():  p.requires_grad=False
-ens_opt  = optim.Adam(ens.fusion.parameters(), lr=5e-3)
-ens_crit = nn.CrossEntropyLoss()
-best_ens = 0
-for ep in range(15):
-    ens.train()
-    for xp,xf,yb in tr_ld:
-        xp,xf,yb=xp.to(device),xf.to(device),yb.to(device)
-        loss=ens_crit(ens(xp,xf),yb)
-        ens_opt.zero_grad();loss.backward();ens_opt.step()
-    ens.eval(); vc=vt=0
+def evaluate_model(model, test_loader, device):
+    """تقييم النموذج على مجموعة الاختبار"""
+    model.eval()
+    correct, total = 0, 0
+    
     with torch.no_grad():
-        for xp,xf,yb in va_ld:
-            xp,xf,yb=xp.to(device),xf.to(device),yb.to(device)
-            out=ens(xp,xf);vc+=(out.argmax(1)==yb).sum().item();vt+=yb.size(0)
-    va_=100*vc/vt
-    if va_>best_ens: best_ens=va_; torch.save(ens.state_dict(),'models/ensemble.pth')
-    if (ep+1)%5==0: print(f"   Ep {ep+1:>2}: {va_:.2f}%")
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+    
+    return 100. * correct / total
 
-ens.load_state_dict(torch.load('models/ensemble.pth', map_location=device, weights_only=True))
-print(f"✅ Ensemble Best: {best_ens:.2f}%")
+def train_model(epochs=10, batch_size=64):
+    """
+    التدريب الرئيسي
+    """
+    print("🚀 Starting training...")
+    
+    # ── 1. تحميل الداتا ──
+    data_path = download_dataset()
+    train_loader, val_loader, test_loader = get_data_loaders(
+        data_path, batch_size, use_dummy=(data_path is None)
+    )
+    
+    if train_loader is None:
+        print("❌ Failed to load data")
+        return
+    
+    # ── 2. إعداد النموذج ──
+    model = PixelCNN()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    
+    print(f"📊 Device: {device}")
+    print(f"📊 Training samples: {len(train_loader.dataset)}")
+    print(f"📊 Validation samples: {len(val_loader.dataset)}")
+    print(f"📊 Test samples: {len(test_loader.dataset)}")
+    
+    # ── 3. التدريب ──
+    history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
+    best_val_acc = 0
+    
+    for epoch in range(epochs):
+        # ── التدريب ──
+        model.train()
+        train_loss, train_correct, train_total = 0, 0, 0
+        
+        for images, labels in tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs}'):
+            images, labels = images.to(device), labels.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            _, predicted = outputs.max(1)
+            train_total += labels.size(0)
+            train_correct += predicted.eq(labels).sum().item()
+        
+        train_acc = 100. * train_correct / train_total
+        
+        # ── التحقق (Validation) ──
+        model.eval()
+        val_loss, val_correct, val_total = 0, 0, 0
+        
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(device), labels.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item()
+                _, predicted = outputs.max(1)
+                val_total += labels.size(0)
+                val_correct += predicted.eq(labels).sum().item()
+        
+        val_acc = 100. * val_correct / val_total
+        
+        # ── حفظ أفضل نموذج ──
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            os.makedirs('app', exist_ok=True)
+            torch.save(model.state_dict(), 'app/pixel.pth')
+            print(f"⭐ New best model! Validation Acc: {val_acc:.2f}%")
+        
+        # ── تسجيل التاريخ ──
+        history['train_loss'].append(train_loss / len(train_loader))
+        history['val_loss'].append(val_loss / len(val_loader))
+        history['train_acc'].append(train_acc)
+        history['val_acc'].append(val_acc)
+        
+        scheduler.step()
+        
+        print(f'Epoch {epoch+1}:')
+        print(f'  Train Loss: {train_loss/len(train_loader):.4f}, Train Acc: {train_acc:.2f}%')
+        print(f'  Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.2f}%')
+    
+    # ── 4. الاختبار النهائي ──
+    print("\n🧪 Final Testing...")
+    model.load_state_dict(torch.load('app/pixel.pth', map_location='cpu'))
+    test_acc = evaluate_model(model, test_loader, device)
+    print(f"✅ Final Test Accuracy: {test_acc:.2f}%")
+    
+    # ── 5. حفظ النتائج ──
+    results = {
+        'accuracy': test_acc / 100,
+        'best_val': best_val_acc / 100,
+        'history': history
+    }
+    
+    os.makedirs('results', exist_ok=True)
+    with open('results/results.json', 'w') as f:
+        json.dump(results, f, indent=2)
+    print("📊 Results saved to results/results.json")
+    
+    # ── 6. حفظ MEAN و STD للاستخدام في التطبيق ──
+    mean = np.array([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
+    std = np.array([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1)
+    np.save('app/norm_mean.npy', mean)
+    np.save('app/norm_std.npy', std)
+    print("✅ Normalization params saved to app/")
+    
+    return model, history, test_acc
 
-# ── Test Evaluation ───────────────────────────────────────
-print("\n📊 Test Evaluation...")
-ens.eval()
-preds=[]; probs=[]; labels=[]
-with torch.no_grad():
-    for xp,xf,yb in te_ld:
-        out=ens(xp.to(device),xf.to(device))
-        pr=torch.softmax(out,1)
-        preds.extend(out.argmax(1).cpu().numpy())
-        probs.extend(pr[:,1].cpu().numpy())
-        labels.extend(yb.numpy())
-preds=np.array(preds); probs=np.array(probs); labels=np.array(labels)
-acc = (preds==labels).mean()*100
-auc = roc_auc_score(labels,probs)
-print(f"🎯 Accuracy: {acc:.2f}%  AUC: {auc:.4f}")
-print(classification_report(labels,preds,target_names=['REAL','FAKE']))
+# ──────────────────────────────────────────────────────────────
+# 6. التشغيل
+# ──────────────────────────────────────────────────────────────
 
-# ── Charts ─────────────────────────────────────────────────
-fig,axes=plt.subplots(2,3,figsize=(18,10))
-fig.suptitle('DeepFake Detector — Results',fontsize=14,fontweight='bold')
-eps_p=range(1,len(h_px['tl'])+1); eps_f=range(1,len(h_fx['tl'])+1)
-for ax,hist,name in [(axes[0,0],h_px,'PixelCNN'),(axes[1,0],h_fx,'FreqCNN')]:
-    ep=range(1,len(hist['tl'])+1)
-    ax.plot(ep,hist['tl'],'b-o',ms=3,label='Train'); ax.plot(ep,hist['vl'],'r-o',ms=3,label='Val')
-    ax.set_title(f'{name} Loss'); ax.legend(); ax.grid(alpha=.3)
-for ax,hist,name in [(axes[0,1],h_px,'PixelCNN'),(axes[1,1],h_fx,'FreqCNN')]:
-    ep=range(1,len(hist['ta'])+1)
-    ax.plot(ep,hist['ta'],'b-o',ms=3,label='Train'); ax.plot(ep,hist['va'],'r-o',ms=3,label='Val')
-    ax.set_title(f'{name} Accuracy'); ax.legend(); ax.grid(alpha=.3)
-fpr,tpr,_=roc_curve(labels,probs)
-axes[0,2].plot(fpr,tpr,'b-',lw=2,label=f'AUC={auc:.3f}')
-axes[0,2].plot([0,1],[0,1],'r--',alpha=.5); axes[0,2].set_title('ROC Curve')
-axes[0,2].legend(); axes[0,2].grid(alpha=.3)
-cm=confusion_matrix(labels,preds)
-sns.heatmap(cm,annot=True,fmt='d',cmap='Blues',ax=axes[1,2],
-            xticklabels=['REAL','FAKE'],yticklabels=['REAL','FAKE'])
-axes[1,2].set_title('Confusion Matrix')
-plt.tight_layout(); plt.savefig('results/training.png',dpi=140,bbox_inches='tight'); plt.close()
-print("💾 results/training.png")
-
-# Confidence
-fig,ax=plt.subplots(figsize=(10,5))
-ax.hist(probs[labels==0],bins=30,color='green',alpha=.7,label='REAL')
-ax.hist(probs[labels==1],bins=30,color='red',  alpha=.7,label='FAKE')
-ax.set_title('Confidence Distribution'); ax.legend(); ax.grid(alpha=.3)
-ax.set_xlabel('P(FAKE)'); ax.set_ylabel('Count')
-plt.tight_layout(); plt.savefig('results/confidence.png',dpi=140,bbox_inches='tight'); plt.close()
-print("💾 results/confidence.png")
-
-json.dump(dict(accuracy=round(acc,4),auc=round(auc,4),
-               pixel_best=round(b_px,4),freq_best=round(b_fx,4),
-               ensemble_best=round(best_ens,4)),
-          open('results/results.json','w'),indent=2)
-
-print(f"\n{'═'*45}")
-print(f"🎉 Done!  Accuracy:{acc:.2f}%  AUC:{auc:.4f}")
-print(f"{'═'*45}")
+if __name__ == "__main__":
+    train_model(epochs=10, batch_size=64)
