@@ -1,5 +1,6 @@
 """
-train.py - تدريب نموذج DeepFake Detector مع تحميل الداتا أونلاين
+train.py - تدريب نموذج DeepFake Detector
+تحميل الداتا من Kaggle أونلاين + تقسيم Train/Validation/Test
 """
 
 import os
@@ -15,6 +16,8 @@ import kagglehub
 from PIL import Image, ImageFilter, ImageEnhance
 import random
 from io import BytesIO
+
+print("🚀 Starting training script...")
 
 # ──────────────────────────────────────────────────────────────
 # 1. تحميل الداتا من Kaggle
