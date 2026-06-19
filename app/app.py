@@ -426,72 +426,72 @@ with tab2:
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        st.markdown("""
-        <div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #7c6af7;border-radius:14px;padding:20px">
-          <div style="font-size:28px;margin-bottom:10px">🧠</div>
-          <div style="font-size:14px;font-weight:700;color:#a78bfa;margin-bottom:8px">Stream 1 — Pixel CNN</div>
-          <div style="font-size:12px;color:#5555aa;line-height:1.8">
-            A 3-block CNN analyzes the raw pixel values.<br><br>
-            DeepFakes leave subtle artifacts in skin texture, eye reflections, and hair edges that are invisible to humans but detectable by CNN filters.<br><br>
-            <b style="color:#8888aa">Architecture:</b> Conv→BN→ReLU×3 + FC layers
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            '<div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #7c6af7;border-radius:14px;padding:20px">'
+            '<div style="font-size:28px;margin-bottom:10px">🧠</div>'
+            '<div style="font-size:14px;font-weight:700;color:#a78bfa;margin-bottom:8px">Stream 1 — Pixel CNN</div>'
+            '<div style="font-size:12px;color:#5555aa;line-height:1.8">'
+            'A 3-block CNN analyzes the raw pixel values.<br><br>'
+            'DeepFakes leave subtle artifacts in skin texture, eye reflections, and hair edges that are invisible to humans but detectable by CNN filters.<br><br>'
+            '<b style="color:#8888aa">Architecture:</b> Conv→BN→ReLU×3 + FC layers'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
 
     with c2:
-        st.markdown("""
-        <div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #f472b6;border-radius:14px;padding:20px">
-          <div style="font-size:28px;margin-bottom:10px">〰️</div>
-          <div style="font-size:14px;font-weight:700;color:#f472b6;margin-bottom:8px">Stream 2 — Frequency Analysis</div>
-          <div style="font-size:12px;color:#5555aa;line-height:1.8">
-            FFT converts the image from pixel space to frequency space.<br><br>
-            GAN upsampling (Transposed Convolution) creates periodic patterns at specific frequencies — like a fingerprint left in every AI-generated image.<br><br>
-            <b style="color:#8888aa">Technique:</b> 2D FFT → log magnitude spectrum
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            '<div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #f472b6;border-radius:14px;padding:20px">'
+            '<div style="font-size:28px;margin-bottom:10px">〰️</div>'
+            '<div style="font-size:14px;font-weight:700;color:#f472b6;margin-bottom:8px">Stream 2 — Frequency Analysis</div>'
+            '<div style="font-size:12px;color:#5555aa;line-height:1.8">'
+            'FFT converts the image from pixel space to frequency space.<br><br>'
+            'GAN upsampling (Transposed Convolution) creates periodic patterns at specific frequencies — like a fingerprint left in every AI-generated image.<br><br>'
+            '<b style="color:#8888aa">Technique:</b> 2D FFT → log magnitude spectrum'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
 
     with c3:
-        st.markdown("""
-        <div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #34d399;border-radius:14px;padding:20px">
-          <div style="font-size:28px;margin-bottom:10px">🗺️</div>
-          <div style="font-size:14px;font-weight:700;color:#34d399;margin-bottom:8px">Stream 3 — Grad-CAM Explainability</div>
-          <div style="font-size:12px;color:#5555aa;line-height:1.8">
-            Grad-CAM traces the model's decision back to specific image regions.<br><br>
-            Instead of a black-box verdict, you see exactly which part of the image triggered the detection — making the AI accountable and auditable.<br><br>
-            <b style="color:#8888aa">Method:</b> Gradient × Activation maps
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            '<div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #34d399;border-radius:14px;padding:20px">'
+            '<div style="font-size:28px;margin-bottom:10px">🗺️</div>'
+            '<div style="font-size:14px;font-weight:700;color:#34d399;margin-bottom:8px">Stream 3 — Grad-CAM Explainability</div>'
+            '<div style="font-size:12px;color:#5555aa;line-height:1.8">'
+            'Grad-CAM traces the model\'s decision back to specific image regions.<br><br>'
+            'Instead of a black-box verdict, you see exactly which part of the image triggered the detection — making the AI accountable and auditable.<br><br>'
+            '<b style="color:#8888aa">Method:</b> Gradient × Activation maps'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("#### ❓ Why DeepFakes are detectable")
 
     w1, w2 = st.columns(2)
     with w1:
-        st.markdown("""
-        <div class="info-card">
-          <div style="font-size:13px;font-weight:600;color:#a78bfa;margin-bottom:8px">The GAN "fingerprint" problem</div>
-          <div style="font-size:12px;color:#5555aa;line-height:1.7">
-            Every GAN architecture leaves a unique signature in the images it generates.
-            Transposed convolutions — used to upsample noise into a full image — create
-            repeating patterns in the frequency domain that don't exist in real photographs.
-            It's like a watermark the AI can't remove.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            '<div class="info-card">'
+            '<div style="font-size:13px;font-weight:600;color:#a78bfa;margin-bottom:8px">The GAN "fingerprint" problem</div>'
+            '<div style="font-size:12px;color:#5555aa;line-height:1.7">'
+            'Every GAN architecture leaves a unique signature in the images it generates. '
+            'Transposed convolutions — used to upsample noise into a full image — create '
+            'repeating patterns in the frequency domain that don\'t exist in real photographs. '
+            'It\'s like a watermark the AI can\'t remove.'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
     with w2:
-        st.markdown("""
-        <div class="info-card">
-          <div style="font-size:13px;font-weight:600;color:#f472b6;margin-bottom:8px">The biological consistency test</div>
-          <div style="font-size:12px;color:#5555aa;line-height:1.7">
-            Real faces have biological constraints — pupils are always round, ear topology
-            is always consistent, lighting respects physics. GANs learn statistical patterns
-            but often fail at these hard constraints, creating subtle inconsistencies
-            that CNN filters learn to detect during training.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            '<div class="info-card">'
+            '<div style="font-size:13px;font-weight:600;color:#f472b6;margin-bottom:8px">The biological consistency test</div>'
+            '<div style="font-size:12px;color:#5555aa;line-height:1.7">'
+            'Real faces have biological constraints — pupils are always round, ear topology '
+            'is always consistent, lighting respects physics. GANs learn statistical patterns '
+            'but often fail at these hard constraints, creating subtle inconsistencies '
+            'that CNN filters learn to detect during training.'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
 
 # ══════════════════════════════════════════════════════════
 # TAB 3 — MODEL INSIGHTS
