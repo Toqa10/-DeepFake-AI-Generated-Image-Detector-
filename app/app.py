@@ -314,4 +314,253 @@ with tab1:
               <div style="font-size:52px;line-height:1">{icon}</div>
               <div style="font-size:26px;font-weight:700;color:{color};
                           font-family:'Space Grotesk';margin:10px 0 4px;
-                          letter-spacing:1px">{
+                          letter-spacing:1px">{label}</div>
+              <div style="font-size:13px;color:#8888aa">{sublabel}</div>
+              <div style="margin-top:16px;display:inline-block;
+                          background:rgba(0,0,0,.3);border-radius:20px;
+                          padding:5px 16px;font-size:13px;color:{color};font-weight:600">
+                Confidence: {conf*100:.1f}%
+              </div>
+            </div>
+            <br>
+            """, unsafe_allow_html=True)
+
+            # ── Probability bars ─────────────────────────────
+            st.markdown("**Probability breakdown**")
+            st.progress(p_real, text=f"✅ REAL — {p_real*100:.1f}%")
+            st.progress(p_fake, text=f"❌ FAKE — {p_fake*100:.1f}%")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # ── Artifact analysis ────────────────────────────
+            st.markdown("**🔬 Artifact Analysis**")
+            labels_map = {
+                'noise': 'Noise Consistency',
+                'color': 'Color Channel Balance',
+                'edges': 'Edge Sharpness',
+                'freq': 'Frequency Artifacts',
+            }
+            a1, a2 = st.columns(2)
+            for i, (key, (status, score)) in enumerate(artifacts.items()):
+                col = a1 if i % 2 == 0 else a2
+                with col:
+                    st.markdown(f"""
+                    <div class="freq-card">
+                      <div style="font-size:11px;color:#5555aa;margin-bottom:4px">{labels_map[key]}</div>
+                      <div style="font-size:13px;font-weight:600;color:#f0f0f8">{status}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        elif uploaded and analyze_btn and not model_ok:
+            st.error("⚠️ Model not loaded. Please run train.py first.")
+            st.info("Run: python train.py")
+
+        elif uploaded and not analyze_btn:
+            st.markdown("""
+            <div style="height:360px;display:flex;flex-direction:column;
+                        align-items:center;justify-content:center;gap:14px;color:#2a2a4a">
+              <div style="font-size:56px">⚡</div>
+              <div style="font-size:14px;color:#5555aa">Click "Run Full Analysis" to start</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style="height:360px;display:flex;flex-direction:column;
+                        align-items:center;justify-content:center;gap:14px">
+              <div style="font-size:56px;opacity:.15">🔍</div>
+              <div style="font-size:14px;color:#2a2a4a">Upload an image to begin</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ── Grad-CAM + FFT ─────────────────────────────────────
+    if uploaded and analyze_btn and model_ok:
+        st.markdown("---")
+        st.markdown("#### 🗺️ Visual Forensics")
+
+        gc1, gc2, gc3 = st.columns(3)
+
+        with gc1:
+            st.markdown("**Original Image**")
+            st.image(pil_img.resize((256,256)), use_column_width=True)
+            st.markdown("<p style='font-size:11px;color:#5555aa;text-align:center'>Input to the model</p>", unsafe_allow_html=True)
+
+        with gc2:
+            st.markdown("**Grad-CAM Heatmap**")
+            try:
+                grad_cam = get_gradcam()
+                if grad_cam:
+                    tensor_in = preprocess_image(pil_img)
+                    cam = grad_cam.generate(tensor_in, class_idx=pred)
+                    overlay = overlay_gradcam(pil_img.resize((256,256)), cam)
+                    st.image(overlay, use_column_width=True)
+                    st.markdown("<p style='font-size:11px;color:#5555aa;text-align:center'>Red = areas the model focused on</p>", unsafe_allow_html=True)
+                else:
+                    st.info("Grad-CAM not available")
+            except Exception as e:
+                st.info(f"Grad-CAM unavailable: {e}")
+
+        with gc3:
+            st.markdown("**FFT Frequency Spectrum**")
+            fft_img = get_fft_features(pil_img.resize((256,256)))
+            st.image(fft_img, use_column_width=True)
+            st.markdown("<p style='font-size:11px;color:#5555aa;text-align:center'>Bright spots at edges = GAN artifacts</p>", unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="info-card" style="margin-top:12px">
+          <div style="font-size:12px;color:#8888aa;line-height:1.8">
+            <b style="color:#a78bfa">How to read these visuals:</b> &nbsp;
+            The <b style="color:#f0f0f8">Grad-CAM</b> shows which pixels most influenced the decision — red areas were "suspicious" to the model.
+            The <b style="color:#f0f0f8">FFT spectrum</b> reveals periodic patterns left by GAN upsampling — real images have smooth spectra while AI-generated ones show unusual bright rings or grid patterns.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════
+# TAB 2 — HOW IT WORKS
+# ══════════════════════════════════════════════════════════
+with tab2:
+    st.markdown("#### 🔬 Detection Pipeline — 3 parallel analysis streams")
+    st.markdown("<p style='color:#5555aa;font-size:13px;margin-bottom:20px'>The system runs three independent analyses and combines them for a final verdict.</p>", unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.markdown("""
+        <div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #7c6af7;border-radius:14px;padding:20px">
+          <div style="font-size:28px;margin-bottom:10px">🧠</div>
+          <div style="font-size:14px;font-weight:700;color:#a78bfa;margin-bottom:8px">Stream 1 — Pixel CNN</div>
+          <div style="font-size:12px;color:#5555aa;line-height:1.8">
+            A 3-block CNN analyzes the raw pixel values.<br><br>
+            DeepFakes leave subtle artifacts in skin texture, eye reflections, and hair edges that are invisible to humans but detectable by CNN filters.<br><br>
+            <b style="color:#8888aa">Architecture:</b> Conv→BN→ReLU×3 + FC layers
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c2:
+        st.markdown("""
+        <div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #f472b6;border-radius:14px;padding:20px">
+          <div style="font-size:28px;margin-bottom:10px">〰️</div>
+          <div style="font-size:14px;font-weight:700;color:#f472b6;margin-bottom:8px">Stream 2 — Frequency Analysis</div>
+          <div style="font-size:12px;color:#5555aa;line-height:1.8">
+            FFT converts the image from pixel space to frequency space.<br><br>
+            GAN upsampling (Transposed Convolution) creates periodic patterns at specific frequencies — like a fingerprint left in every AI-generated image.<br><br>
+            <b style="color:#8888aa">Technique:</b> 2D FFT → log magnitude spectrum
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with c3:
+        st.markdown("""
+        <div style="background:#0f0f1a;border:1px solid #1e1e2e;border-top:3px solid #34d399;border-radius:14px;padding:20px">
+          <div style="font-size:28px;margin-bottom:10px">🗺️</div>
+          <div style="font-size:14px;font-weight:700;color:#34d399;margin-bottom:8px">Stream 3 — Grad-CAM Explainability</div>
+          <div style="font-size:12px;color:#5555aa;line-height:1.8">
+            Grad-CAM traces the model's decision back to specific image regions.<br><br>
+            Instead of a black-box verdict, you see exactly which part of the image triggered the detection — making the AI accountable and auditable.<br><br>
+            <b style="color:#8888aa">Method:</b> Gradient × Activation maps
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("#### ❓ Why DeepFakes are detectable")
+
+    w1, w2 = st.columns(2)
+    with w1:
+        st.markdown("""
+        <div class="info-card">
+          <div style="font-size:13px;font-weight:600;color:#a78bfa;margin-bottom:8px">The GAN "fingerprint" problem</div>
+          <div style="font-size:12px;color:#5555aa;line-height:1.7">
+            Every GAN architecture leaves a unique signature in the images it generates.
+            Transposed convolutions — used to upsample noise into a full image — create
+            repeating patterns in the frequency domain that don't exist in real photographs.
+            It's like a watermark the AI can't remove.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with w2:
+        st.markdown("""
+        <div class="info-card">
+          <div style="font-size:13px;font-weight:600;color:#f472b6;margin-bottom:8px">The biological consistency test</div>
+          <div style="font-size:12px;color:#5555aa;line-height:1.7">
+            Real faces have biological constraints — pupils are always round, ear topology
+            is always consistent, lighting respects physics. GANs learn statistical patterns
+            but often fail at these hard constraints, creating subtle inconsistencies
+            that CNN filters learn to detect during training.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+# ══════════════════════════════════════════════════════════
+# TAB 3 — MODEL INSIGHTS
+# ══════════════════════════════════════════════════════════
+with tab3:
+    st.markdown("#### 📊 Training Results & Model Performance")
+
+    try:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        res_path = os.path.join(os.path.dirname(app_dir), 'results', 'results.json')
+        
+        if not os.path.exists(res_path):
+            res_path = os.path.join(app_dir, '..', 'results', 'results.json')
+        
+        with open(res_path) as f:
+            res = json.load(f)
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Test Accuracy", f"{res['accuracy']*100:.2f}%")
+        r2.metric("Best Val Acc", f"{res['best_val']*100:.2f}%")
+        r3.metric("Training Epochs", "10")
+        r4.metric("Training Images", "1,800+")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Training curves
+        hist = res.get('history', {})
+        if hist and 'train_loss' in hist:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+
+            fig, axes = plt.subplots(1, 2, figsize=(14, 4),
+                                     facecolor='#07070f')
+            fig.suptitle('Training History', color='#a78bfa',
+                         fontsize=13, fontweight='bold')
+
+            eps = range(1, len(hist['train_loss']) + 1)
+            for ax in axes:
+                ax.set_facecolor('#0f0f1a')
+                ax.tick_params(colors='#5555aa')
+                for spine in ax.spines.values():
+                    spine.set_color('#1e1e2e')
+
+            axes[0].plot(eps, hist['train_loss'], 'o-', color='#7c6af7', ms=5, label='Train')
+            axes[0].plot(eps, hist['val_loss'], 'o-', color='#f472b6', ms=5, label='Val')
+            axes[0].set_title('Loss', color='#8888aa')
+            axes[0].set_xlabel('Epoch', color='#5555aa')
+            axes[0].legend(facecolor='#0f0f1a', labelcolor='#8888aa')
+            axes[0].grid(alpha=.15, color='#2a2a4a')
+
+            axes[1].plot(eps, hist['train_acc'], 'o-', color='#7c6af7', ms=5, label='Train')
+            axes[1].plot(eps, hist['val_acc'], 'o-', color='#f472b6', ms=5, label='Val')
+            axes[1].set_title('Accuracy %', color='#8888aa')
+            axes[1].set_xlabel('Epoch', color='#5555aa')
+            axes[1].legend(facecolor='#0f0f1a', labelcolor='#8888aa')
+            axes[1].grid(alpha=.15, color='#2a2a4a')
+
+            plt.tight_layout()
+            buf = BytesIO()
+            plt.savefig(buf, format='png', dpi=140,
+                        bbox_inches='tight', facecolor='#07070f')
+            plt.close()
+            st.image(buf.getvalue(), use_column_width=True)
+
+    except Exception as e:
+        st.info(f"Results file not found — run train.py first. ({e})")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    with st.expander("🏗️ Full Architecture Details"):
+        st.markdown("""
+        **PixelCNN Architecture**
