@@ -97,13 +97,14 @@ def load_model():
         std_path = os.path.join(parent_dir, 'app', 'norm_std.npy')
     
     model = PixelCNN()
+    model_ok = False
     
     if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location='cpu', weights_only=True))
-        model_ok = True
-    else:
-        st.warning("⚠️ Model not found. Please run train.py first.")
-        model_ok = False
+        try:
+            model.load_state_dict(torch.load(model_path, map_location='cpu', weights_only=True))
+            model_ok = True
+        except:
+            pass
     
     model.eval()
     
@@ -135,7 +136,7 @@ def get_fft_features(pil_img):
     arr = np.array(img, dtype='float32')
     f = np.fft.fft2(arr)
     mag = np.log1p(np.abs(np.fft.fftshift(f)))
-    mag = ((mag - mag.min()) / (mag.max() - mag.min()) * 255).astype('uint8')
+    mag = ((mag - mag.min()) / (mag.max() - mag.min() + 1e-8) * 255).astype('uint8')
     return Image.fromarray(mag).convert('RGB')
 
 def predict(pil_img):
@@ -214,8 +215,8 @@ def analyze_artifacts(pil_img):
     fft = np.fft.fft2(gray)
     mag = np.abs(np.fft.fftshift(fft))
     center_energy = mag[96:160, 96:160].sum()
-    total_energy = mag.sum()
-    freq_ratio = center_energy / (total_energy + 1e-8)
+    total_energy = mag.sum() + 1e-8
+    freq_ratio = center_energy / total_energy
     results['freq'] = ('Artifacts detected ⚠️' if freq_ratio < 0.3 else 'Clean ✅',
                        1 - freq_ratio)
 
@@ -262,26 +263,27 @@ with tab1:
             analyze_btn = st.button("⚡ Run Full Analysis", use_container_width=True,
                                     type="primary")
 
-            st.markdown("""
-            <div class="info-card">
-              <div style="font-size:11px;color:#5555aa;line-height:1.8">
-                <b style="color:#a78bfa">What gets analyzed:</b><br>
-                · Pixel-level CNN artifact detection<br>
-                · FFT frequency domain signatures<br>
-                · Grad-CAM suspicious region heatmap<br>
-                · Noise, color & edge consistency
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                '<div class="info-card">'
+                '<div style="font-size:11px;color:#5555aa;line-height:1.8">'
+                '<b style="color:#a78bfa">What gets analyzed:</b><br>'
+                '· Pixel-level CNN artifact detection<br>'
+                '· FFT frequency domain signatures<br>'
+                '· Grad-CAM suspicious region heatmap<br>'
+                '· Noise, color & edge consistency'
+                '</div></div>',
+                unsafe_allow_html=True
+            )
         else:
-            st.markdown("""
-            <div style="height:280px;background:#0f0f1a;border:1.5px dashed #2a2a4a;
-                        border-radius:14px;display:flex;flex-direction:column;
-                        align-items:center;justify-content:center;gap:12px;color:#2a2a4a">
-              <div style="font-size:48px">🖼️</div>
-              <div style="font-size:13px">Drop an image here</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                '<div style="height:280px;background:#0f0f1a;border:1.5px dashed #2a2a4a;'
+                'border-radius:14px;display:flex;flex-direction:column;'
+                'align-items:center;justify-content:center;gap:12px;color:#2a2a4a">'
+                '<div style="font-size:48px">🖼️</div>'
+                '<div style="font-size:13px">Drop an image here</div>'
+                '</div>',
+                unsafe_allow_html=True
+            )
             analyze_btn = False
 
     with col_res:
@@ -291,7 +293,6 @@ with tab1:
                 pred, p_real, p_fake = predict(pil_img)
                 artifacts = analyze_artifacts(pil_img)
 
-            # ── Verdict ─────────────────────────────────────
             conf = p_real if pred == 0 else p_fake
             if conf >= 0.85:
                 if pred == 0:
@@ -325,14 +326,12 @@ with tab1:
             <br>
             """, unsafe_allow_html=True)
 
-            # ── Probability bars ─────────────────────────────
             st.markdown("**Probability breakdown**")
             st.progress(p_real, text=f"✅ REAL — {p_real*100:.1f}%")
             st.progress(p_fake, text=f"❌ FAKE — {p_fake*100:.1f}%")
 
             st.markdown("<br>", unsafe_allow_html=True)
 
-            # ── Artifact analysis ────────────────────────────
             st.markdown("**🔬 Artifact Analysis**")
             labels_map = {
                 'noise': 'Noise Consistency',
@@ -356,21 +355,23 @@ with tab1:
             st.info("Run: python train.py")
 
         elif uploaded and not analyze_btn:
-            st.markdown("""
-            <div style="height:360px;display:flex;flex-direction:column;
-                        align-items:center;justify-content:center;gap:14px;color:#2a2a4a">
-              <div style="font-size:56px">⚡</div>
-              <div style="font-size:14px;color:#5555aa">Click "Run Full Analysis" to start</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                '<div style="height:360px;display:flex;flex-direction:column;'
+                'align-items:center;justify-content:center;gap:14px;color:#2a2a4a">'
+                '<div style="font-size:56px">⚡</div>'
+                '<div style="font-size:14px;color:#5555aa">Click "Run Full Analysis" to start</div>'
+                '</div>',
+                unsafe_allow_html=True
+            )
         else:
-            st.markdown("""
-            <div style="height:360px;display:flex;flex-direction:column;
-                        align-items:center;justify-content:center;gap:14px">
-              <div style="font-size:56px;opacity:.15">🔍</div>
-              <div style="font-size:14px;color:#2a2a4a">Upload an image to begin</div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                '<div style="height:360px;display:flex;flex-direction:column;'
+                'align-items:center;justify-content:center;gap:14px">'
+                '<div style="font-size:56px;opacity:.15">🔍</div>'
+                '<div style="font-size:14px;color:#2a2a4a">Upload an image to begin</div>'
+                '</div>',
+                unsafe_allow_html=True
+            )
 
     # ── Grad-CAM + FFT ─────────────────────────────────────
     if uploaded and analyze_btn and model_ok:
@@ -405,15 +406,15 @@ with tab1:
             st.image(fft_img, use_column_width=True)
             st.markdown("<p style='font-size:11px;color:#5555aa;text-align:center'>Bright spots at edges = GAN artifacts</p>", unsafe_allow_html=True)
 
-        st.markdown("""
-        <div class="info-card" style="margin-top:12px">
-          <div style="font-size:12px;color:#8888aa;line-height:1.8">
-            <b style="color:#a78bfa">How to read these visuals:</b> &nbsp;
-            The <b style="color:#f0f0f8">Grad-CAM</b> shows which pixels most influenced the decision — red areas were "suspicious" to the model.
-            The <b style="color:#f0f0f8">FFT spectrum</b> reveals periodic patterns left by GAN upsampling — real images have smooth spectra while AI-generated ones show unusual bright rings or grid patterns.
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            '<div class="info-card" style="margin-top:12px">'
+            '<div style="font-size:12px;color:#8888aa;line-height:1.8">'
+            '<b style="color:#a78bfa">How to read these visuals:</b> &nbsp;'
+            'The <b style="color:#f0f0f8">Grad-CAM</b> shows which pixels most influenced the decision — red areas were "suspicious" to the model. '
+            'The <b style="color:#f0f0f8">FFT spectrum</b> reveals periodic patterns left by GAN upsampling — real images have smooth spectra while AI-generated ones show unusual bright rings or grid patterns.'
+            '</div></div>',
+            unsafe_allow_html=True
+        )
 
 # ══════════════════════════════════════════════════════════
 # TAB 2 — HOW IT WORKS
@@ -505,56 +506,58 @@ with tab3:
         if not os.path.exists(res_path):
             res_path = os.path.join(app_dir, '..', 'results', 'results.json')
         
-        with open(res_path) as f:
-            res = json.load(f)
+        if os.path.exists(res_path):
+            with open(res_path) as f:
+                res = json.load(f)
 
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Test Accuracy", f"{res['accuracy']*100:.2f}%")
-        r2.metric("Best Val Acc", f"{res['best_val']*100:.2f}%")
-        r3.metric("Training Epochs", "10")
-        r4.metric("Training Images", "1,800+")
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Test Accuracy", f"{res['accuracy']*100:.2f}%")
+            r2.metric("Best Val Acc", f"{res['best_val']*100:.2f}%")
+            r3.metric("Training Epochs", "10")
+            r4.metric("Training Images", "1,800+")
 
-        st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
 
-        # Training curves
-        hist = res.get('history', {})
-        if hist and 'train_loss' in hist:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
+            hist = res.get('history', {})
+            if hist and 'train_loss' in hist:
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
 
-            fig, axes = plt.subplots(1, 2, figsize=(14, 4),
-                                     facecolor='#07070f')
-            fig.suptitle('Training History', color='#a78bfa',
-                         fontsize=13, fontweight='bold')
+                fig, axes = plt.subplots(1, 2, figsize=(14, 4),
+                                         facecolor='#07070f')
+                fig.suptitle('Training History', color='#a78bfa',
+                             fontsize=13, fontweight='bold')
 
-            eps = range(1, len(hist['train_loss']) + 1)
-            for ax in axes:
-                ax.set_facecolor('#0f0f1a')
-                ax.tick_params(colors='#5555aa')
-                for spine in ax.spines.values():
-                    spine.set_color('#1e1e2e')
+                eps = range(1, len(hist['train_loss']) + 1)
+                for ax in axes:
+                    ax.set_facecolor('#0f0f1a')
+                    ax.tick_params(colors='#5555aa')
+                    for spine in ax.spines.values():
+                        spine.set_color('#1e1e2e')
 
-            axes[0].plot(eps, hist['train_loss'], 'o-', color='#7c6af7', ms=5, label='Train')
-            axes[0].plot(eps, hist['val_loss'], 'o-', color='#f472b6', ms=5, label='Val')
-            axes[0].set_title('Loss', color='#8888aa')
-            axes[0].set_xlabel('Epoch', color='#5555aa')
-            axes[0].legend(facecolor='#0f0f1a', labelcolor='#8888aa')
-            axes[0].grid(alpha=.15, color='#2a2a4a')
+                axes[0].plot(eps, hist['train_loss'], 'o-', color='#7c6af7', ms=5, label='Train')
+                axes[0].plot(eps, hist['val_loss'], 'o-', color='#f472b6', ms=5, label='Val')
+                axes[0].set_title('Loss', color='#8888aa')
+                axes[0].set_xlabel('Epoch', color='#5555aa')
+                axes[0].legend(facecolor='#0f0f1a', labelcolor='#8888aa')
+                axes[0].grid(alpha=.15, color='#2a2a4a')
 
-            axes[1].plot(eps, hist['train_acc'], 'o-', color='#7c6af7', ms=5, label='Train')
-            axes[1].plot(eps, hist['val_acc'], 'o-', color='#f472b6', ms=5, label='Val')
-            axes[1].set_title('Accuracy %', color='#8888aa')
-            axes[1].set_xlabel('Epoch', color='#5555aa')
-            axes[1].legend(facecolor='#0f0f1a', labelcolor='#8888aa')
-            axes[1].grid(alpha=.15, color='#2a2a4a')
+                axes[1].plot(eps, hist['train_acc'], 'o-', color='#7c6af7', ms=5, label='Train')
+                axes[1].plot(eps, hist['val_acc'], 'o-', color='#f472b6', ms=5, label='Val')
+                axes[1].set_title('Accuracy %', color='#8888aa')
+                axes[1].set_xlabel('Epoch', color='#5555aa')
+                axes[1].legend(facecolor='#0f0f1a', labelcolor='#8888aa')
+                axes[1].grid(alpha=.15, color='#2a2a4a')
 
-            plt.tight_layout()
-            buf = BytesIO()
-            plt.savefig(buf, format='png', dpi=140,
-                        bbox_inches='tight', facecolor='#07070f')
-            plt.close()
-            st.image(buf.getvalue(), use_column_width=True)
+                plt.tight_layout()
+                buf = BytesIO()
+                plt.savefig(buf, format='png', dpi=140,
+                            bbox_inches='tight', facecolor='#07070f')
+                plt.close()
+                st.image(buf.getvalue(), use_column_width=True)
+        else:
+            st.info("📊 No training results found. Run `python train.py` first to generate results.")
 
     except Exception as e:
         st.info(f"Results file not found — run train.py first. ({e})")
