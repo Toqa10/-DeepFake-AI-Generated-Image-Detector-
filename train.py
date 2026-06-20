@@ -35,7 +35,7 @@ def download_from_kaggle():
         return None
 
 # ──────────────────────────────────────────────────────────────
-# 2. تعريف النموذج (مُصلح)
+# 2. تعريف النموذج
 # ──────────────────────────────────────────────────────────────
 
 class PixelCNN(nn.Module):
@@ -59,7 +59,7 @@ class PixelCNN(nn.Module):
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(128 * 16, 256),  # 128 * 4 * 4 = 2048
+            nn.Linear(128 * 16, 256),
             nn.ReLU(),
             nn.Dropout(0.4),
             nn.Linear(256, 64),
@@ -78,6 +78,7 @@ class PixelCNN(nn.Module):
 def get_data_loaders(data_path, batch_size=64):
     """تحميل وتقسيم البيانات"""
     
+    # لو مفيش داتا، استخدم داتا وهمية
     if data_path is None or not os.path.exists(data_path):
         print("⚠️ No data path provided. Using dummy data...")
         return create_dummy_data(batch_size)
@@ -90,14 +91,17 @@ def get_data_loaders(data_path, batch_size=64):
     ])
     
     try:
+        # حمل الداتا من المجلد
         dataset = datasets.ImageFolder(data_path, transform=transform)
+        
         if len(dataset) == 0:
             print("⚠️ No images found. Using dummy data...")
             return create_dummy_data(batch_size)
         
         print(f"📊 Loaded {len(dataset)} images")
+        print(f"📊 Classes: {dataset.classes}")
         
-        # تقسيم
+        # تقسيم البيانات
         total = len(dataset)
         train_size = int(0.7 * total)
         val_size = int(0.15 * total)
@@ -122,6 +126,8 @@ def get_data_loaders(data_path, batch_size=64):
 def create_dummy_data(batch_size):
     """داتا وهمية للاختبار"""
     from torch.utils.data import TensorDataset
+    
+    print("📊 Creating dummy data for testing...")
     
     # REAL: صور فاتحة
     real = torch.randn(2000, 3, 64, 64) * 0.2 + 0.8
@@ -154,6 +160,7 @@ def create_dummy_data(batch_size):
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
     
+    print(f"📊 Dummy - Train: {train_size}, Val: {val_size}, Test: {test_size}")
     return train_loader, val_loader, test_loader
 
 # ──────────────────────────────────────────────────────────────
@@ -164,8 +171,10 @@ def train_model(epochs=10, batch_size=64):
     """التدريب الرئيسي"""
     print("🚀 Starting training...")
     
-    # ── تحميل الداتا ──
+    # ── تحميل الداتا من Kaggle ──
     data_path = download_from_kaggle()
+    
+    # ── تحضير البيانات ──
     train_loader, val_loader, test_loader = get_data_loaders(data_path, batch_size)
     
     # ── إعداد النموذج ──
@@ -178,6 +187,8 @@ def train_model(epochs=10, batch_size=64):
     
     print(f"📊 Device: {device}")
     print(f"📊 Training on {len(train_loader.dataset)} samples")
+    print(f"📊 Validation on {len(val_loader.dataset)} samples")
+    print(f"📊 Test on {len(test_loader.dataset)} samples")
     
     # ── التدريب ──
     best_acc = 0
@@ -275,6 +286,10 @@ def train_model(epochs=10, batch_size=64):
     
     # ── رسم النتائج ──
     plot_results(history, test_acc)
+    
+    print(f"\n{'═'*45}")
+    print(f"🎉 Done!  Accuracy: {test_acc:.2f}%")
+    print(f"{'═'*45}")
 
 def plot_results(history, test_acc):
     """رسم منحنيات التدريب"""
