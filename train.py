@@ -1,260 +1,237 @@
-"""
-train.py - تدريب نموذج DeepFake Detector
-"""
-
-import os
-import json
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-from torchvision import datasets, transforms
+import torch, torch.nn as nn, torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset, random_split
 import numpy as np
-from tqdm import tqdm
-import random
-from PIL import Image
+import matplotlib; matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve, classification_report
+import seaborn as sns, os, json, time
 
-print("🚀 Starting training...")
+os.makedirs('models', exist_ok=True)
+os.makedirs('results', exist_ok=True)
+device = torch.device('cpu')
+print(f"🖥️  Device: {device}")
 
-# ──────────────────────────────────────────────────────────────
-# 1. تعريف النموذج (نفس اللي في app.py)
-# ──────────────────────────────────────────────────────────────
+# ── Data — يقرأ من الـ Kaggle folders مباشرة ─────────────
+from torchvision import datasets, transforms
 
+DATA_DIR = 'data/real_vs_fake'
+if not os.path.exists(DATA_DIR):
+    print("❌ الداتا مش موجودة!")
+    print("حطي الداتا هنا: data/real_vs_fake/train/real & fake")
+    exit(1)
+
+train_transform = transforms.Compose([
+    transforms.Resize((128, 128)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
+])
+val_transform = transforms.Compose([
+    transforms.Resize((128, 128)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225]),
+])
+
+train_ds = datasets.ImageFolder(os.path.join(DATA_DIR,'train'), train_transform)
+val_ds   = datasets.ImageFolder(os.path.join(DATA_DIR,'valid'), val_transform)
+
+print(f"\n📂 Class mapping: {train_ds.class_to_idx}")
+FAKE_IDX = train_ds.class_to_idx.get('fake', 0)
+REAL_IDX = train_ds.class_to_idx.get('real', 1)
+
+tr_ld = DataLoader(train_ds, batch_size=64, shuffle=True,  num_workers=2)
+va_ld = DataLoader(val_ds,   batch_size=64, shuffle=False, num_workers=2)
+te_ld = va_ld  # نستخدم validation كـ test
+
+print(f"✅ Train:{len(train_ds):,}  Val:{len(val_ds):,}")
+
+# ImageNet normalization — ثابتة مش محتاجة تتحسب
+np.save('data/norm_mean.npy', np.array([0.485,0.456,0.406],'float32').reshape(3,1,1))
+np.save('data/norm_std.npy',  np.array([0.229,0.224,0.225],'float32').reshape(3,1,1))
+
+def fft_features_batch(batch):
+    """بتاخد batch tensor وبترجع FFT magnitude"""
+    B,C,H,W = batch.shape
+    out = torch.zeros_like(batch)
+    imgs = batch.cpu().numpy()
+    for i in range(B):
+        for c in range(C):
+            f   = np.fft.fft2(imgs[i,c])
+            mag = np.log1p(np.abs(np.fft.fftshift(f))).astype('float32')
+            mn,mx = mag.min(), mag.max()
+            out[i,c] = torch.tensor((mag-mn)/(mx-mn+1e-8))
+    return out.to(batch.device)
+
+# ── Models ────────────────────────────────────────────────
 class PixelCNN(nn.Module):
-    """نموذج الكشف عن الصور المزيفة"""
     def __init__(self):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
+            nn.Conv2d(3,32,3,padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32,64,3,padding=1), nn.BatchNorm2d(64), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(64,128,3,padding=1), nn.BatchNorm2d(128), nn.ReLU(),
             nn.AdaptiveAvgPool2d(4),
         )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(128 * 16, 256),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(256, 64),
-            nn.ReLU(),
-            nn.Linear(64, 2)
+        self.clf = nn.Sequential(
+            nn.Flatten(), nn.Linear(256*16,512), nn.ReLU(), nn.Dropout(0.4),
+            nn.Linear(256,64), nn.ReLU(), nn.Linear(64,2)
         )
-    
-    def forward(self, x):
-        x = self.features(x)
-        return self.classifier(x)
+    def forward(self,x): return self.clf(self.features(x))
 
-# ──────────────────────────────────────────────────────────────
-# 2. تحميل الداتا
-# ──────────────────────────────────────────────────────────────
+class FreqCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3,32,3,padding=1), nn.BatchNorm2d(32), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(32,64,3,padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.AdaptiveAvgPool2d(4),
+        )
+        self.clf = nn.Sequential(
+            nn.Flatten(), nn.Linear(64*16,128), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(128,2)
+        )
+    def forward(self,x): return self.clf(self.features(x))
 
-def get_data_loaders(data_path=None, batch_size=64):
-    """تحميل وتقسيم البيانات"""
-    
-    transform = transforms.Compose([
-        transforms.Resize((64, 64)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
-    
-    # ── محاولة تحميل داتا حقيقية ──
-    if data_path and os.path.exists(data_path):
-        try:
-            dataset = datasets.ImageFolder(data_path, transform=transform)
-            if len(dataset) > 0:
-                print(f"📊 Loaded {len(dataset)} real images")
-                return split_dataset(dataset, batch_size)
-        except:
-            print("⚠️ Error loading real data")
-    
-    # ── داتا وهمية للاختبار ──
-    print("📊 Using dummy data for testing...")
-    return create_dummy_data(batch_size)
+class Ensemble(nn.Module):
+    def __init__(self,p,f):
+        super().__init__()
+        self.pixel=p; self.freq=f
+        self.fusion=nn.Sequential(nn.Linear(4,32),nn.ReLU(),nn.Linear(32,2))
+    def forward(self,xp,xf):
+        return self.fusion(torch.cat([self.pixel(xp),self.freq(xf)],dim=1))
 
-def split_dataset(dataset, batch_size):
-    """تقسيم البيانات"""
-    total = len(dataset)
-    train_size = int(0.7 * total)
-    val_size = int(0.15 * total)
-    test_size = total - train_size - val_size
-    
-    train_data, val_data, test_data = random_split(
-        dataset, [train_size, val_size, test_size]
-    )
-    
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
-    
-    print(f"📊 Train: {train_size}, Val: {val_size}, Test: {test_size}")
-    return train_loader, val_loader, test_loader
+pixel_m = PixelCNN().to(device)
+freq_m  = FreqCNN().to(device)
 
-def create_dummy_data(batch_size):
-    """داتا وهمية مع فروق واضحة"""
-    from torch.utils.data import TensorDataset
-    
-    # REAL: صور فاتحة
-    real = torch.randn(2000, 3, 64, 64) * 0.2 + 0.8
-    real = torch.clamp(real, 0, 1)
-    real_labels = torch.zeros(2000)
-    
-    # FAKE: صور داكنة
-    fake = torch.randn(2000, 3, 64, 64) * 0.2 + 0.2
-    fake = torch.clamp(fake, 0, 1)
-    fake_labels = torch.ones(2000)
-    
-    images = torch.cat([real, fake])
-    labels = torch.cat([real_labels, fake_labels])
-    
-    idx = torch.randperm(4000)
-    images, labels = images[idx], labels[idx]
-    
-    dataset = TensorDataset(images, labels)
-    return split_dataset(dataset, batch_size)
-
-# ──────────────────────────────────────────────────────────────
-# 3. التدريب
-# ──────────────────────────────────────────────────────────────
-
-def train_model(data_path=None, epochs=15, batch_size=64):
-    """التدريب الرئيسي"""
-    print("🚀 Starting training...")
-    
-    # ── تحميل الداتا ──
-    train_loader, val_loader, test_loader = get_data_loaders(data_path, batch_size)
-    
-    # ── إعداد النموذج ──
-    model = PixelCNN()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-    
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3)
-    
-    print(f"📊 Device: {device}")
-    print(f"📊 Training on {len(train_loader.dataset)} samples")
-    
-    # ── التدريب ──
-    best_acc = 0
-    history = {'train_loss': [], 'val_loss': [], 'train_acc': [], 'val_acc': []}
-    
-    for epoch in range(epochs):
-        # تدريب
+# ── Train ─────────────────────────────────────────────────
+def train_one(model, use_freq, save_path, epochs=15, name=""):
+    crit = nn.CrossEntropyLoss(label_smoothing=0.05)
+    opt  = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    sch  = optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
+    hist = {'tl':[],'ta':[],'vl':[],'va':[]}
+    best = 0
+    print(f"\n🚀 {name}  ({epochs} epochs)")
+    print(f"{'Ep':>3}|{'TrL':>7}|{'TrA':>6}|{'VaL':>7}|{'VaA':>6}")
+    print("─"*36)
+    for ep in range(1,epochs+1):
         model.train()
-        train_loss, train_correct, train_total = 0, 0, 0
-        
-        for images, labels in tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs}'):
-            images, labels = images.to(device), labels.to(device)
-            
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
-            train_total += labels.size(0)
-            train_correct += predicted.eq(labels).sum().item()
-        
-        train_acc = 100. * train_correct / train_total
-        
-        # تقييم
-        model.eval()
-        val_loss, val_correct, val_total = 0, 0, 0
-        
+        tl=tc=tt=0
+        for imgs,yb in tr_ld:
+            imgs,yb=imgs.to(device),yb.to(device)
+            xin=fft_features_batch(imgs) if use_freq else imgs
+            out=model(xin)
+            loss=crit(out,yb)
+            opt.zero_grad();loss.backward();nn.utils.clip_grad_norm_(model.parameters(),1);opt.step()
+            tl+=loss.item()*yb.size(0);tc+=(out.argmax(1)==yb).sum().item();tt+=yb.size(0)
+        sch.step()
+        model.eval(); vl=vc=vt=0
         with torch.no_grad():
-            for images, labels in val_loader:
-                images, labels = images.to(device), labels.to(device)
-                outputs = model(images)
-                loss = criterion(outputs, labels)
-                
-                val_loss += loss.item()
-                _, predicted = outputs.max(1)
-                val_total += labels.size(0)
-                val_correct += predicted.eq(labels).sum().item()
-        
-        val_acc = 100. * val_correct / val_total
-        scheduler.step(val_loss)
-        
-        # حفظ التاريخ
-        history['train_loss'].append(train_loss / len(train_loader))
-        history['val_loss'].append(val_loss / len(val_loader))
-        history['train_acc'].append(train_acc)
-        history['val_acc'].append(val_acc)
-        
-        # حفظ أفضل نموذج
-        if val_acc > best_acc:
-            best_acc = val_acc
-            os.makedirs('app', exist_ok=True)
-            torch.save(model.state_dict(), 'app/pixel.pth')
-            print(f"⭐ New best model! Val Acc: {val_acc:.2f}%")
-        
-        print(f"Epoch {epoch+1}: Train Acc: {train_acc:.2f}%, Val Acc: {val_acc:.2f}%")
-    
-    # ── اختبار نهائي ──
-    model.load_state_dict(torch.load('app/pixel.pth', map_location='cpu'))
-    model.eval()
-    
-    test_correct, test_total = 0, 0
+            for imgs,yb in va_ld:
+                imgs,yb=imgs.to(device),yb.to(device)
+                xin=fft_features_batch(imgs) if use_freq else imgs
+                out=model(xin);loss=crit(out,yb)
+                vl+=loss.item()*yb.size(0);vc+=(out.argmax(1)==yb).sum().item();vt+=yb.size(0)
+        ta,va_=100*tc/tt,100*vc/vt
+        hist['tl'].append(tl/tt);hist['ta'].append(ta)
+        hist['vl'].append(vl/vt);hist['va'].append(va_)
+        star=''
+        if va_>best: best=va_; torch.save(model.state_dict(),save_path); star=' 💾'
+        if ep%5==0 or ep==1:
+            print(f"{ep:>3}|{tl/tt:>7.4f}|{ta:>5.1f}%|{vl/vt:>7.4f}|{va_:>5.1f}%{star}")
+    print(f"✅ Best: {best:.2f}%")
+    return hist, best
+
+h_px, b_px = train_one(pixel_m, False, 'models/pixel.pth', 20, "PixelCNN")
+h_fx, b_fx = train_one(freq_m,  True,  'models/freq.pth',  20, "FreqCNN")
+
+pixel_m.load_state_dict(torch.load('models/pixel.pth', map_location=device, weights_only=True))
+freq_m.load_state_dict( torch.load('models/freq.pth',  map_location=device, weights_only=True))
+
+# Ensemble
+print("\n🚀 Ensemble fusion...")
+ens = Ensemble(pixel_m, freq_m).to(device)
+for p in ens.pixel.parameters(): p.requires_grad=False
+for p in ens.freq.parameters():  p.requires_grad=False
+ens_opt  = optim.Adam(ens.fusion.parameters(), lr=5e-3)
+ens_crit = nn.CrossEntropyLoss()
+best_ens = 0
+for ep in range(15):
+    ens.train()
+    for imgs,yb in tr_ld:
+        imgs,yb=imgs.to(device),yb.to(device)
+        fft_imgs=fft_features_batch(imgs)
+        loss=ens_crit(ens(imgs,fft_imgs),yb)
+        ens_opt.zero_grad();loss.backward();ens_opt.step()
+    ens.eval(); vc=vt=0
     with torch.no_grad():
-        for images, labels in test_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            _, predicted = outputs.max(1)
-            test_total += labels.size(0)
-            test_correct += predicted.eq(labels).sum().item()
-    
-    test_acc = 100. * test_correct / test_total
-    print(f"\n✅ Final Test Accuracy: {test_acc:.2f}%")
-    
-    # ── حفظ النتائج ──
-    results = {
-        'accuracy': test_acc / 100,
-        'best_val': best_acc / 100,
-        'history': history
-    }
-    
-    os.makedirs('results', exist_ok=True)
-    with open('results/results.json', 'w') as f:
-        json.dump(results, f, indent=2)
-    
-    # حفظ MEAN/STD
-    mean = np.array([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
-    std = np.array([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1)
-    np.save('app/norm_mean.npy', mean)
-    np.save('app/norm_std.npy', std)
-    
-    print("✅ Model saved to app/pixel.pth")
-    print("✅ Normalization params saved to app/")
-    print("📊 Results saved to results/results.json")
+        for imgs,yb in va_ld:
+            imgs,yb=imgs.to(device),yb.to(device)
+            out=ens(imgs,fft_features_batch(imgs));vc+=(out.argmax(1)==yb).sum().item();vt+=yb.size(0)
+    va_=100*vc/vt
+    if va_>best_ens: best_ens=va_; torch.save(ens.state_dict(),'models/ensemble.pth')
+    if (ep+1)%5==0: print(f"   Ep {ep+1:>2}: {va_:.2f}%")
 
-# ──────────────────────────────────────────────────────────────
-# 4. التشغيل
-# ──────────────────────────────────────────────────────────────
+ens.load_state_dict(torch.load('models/ensemble.pth', map_location=device, weights_only=True))
+print(f"✅ Ensemble Best: {best_ens:.2f}%")
 
-if __name__ == "__main__":
-    # حاول تحميل الداتا من Kaggle
-    data_path = None
-    
-    try:
-        import kagglehub
-        print("📥 Downloading dataset from Kaggle...")
-        data_path = kagglehub.dataset_download("xhlulu/140k-real-and-fake-faces")
-        print(f"✅ Dataset downloaded to: {data_path}")
-    except:
-        print("⚠️ Could not download dataset, using dummy data")
-    
-    train_model(data_path=data_path, epochs=15, batch_size=64)
+# ── Test Evaluation ───────────────────────────────────────
+print("\n📊 Test Evaluation...")
+ens.eval()
+preds=[]; probs=[]; labels=[]
+with torch.no_grad():
+    for imgs,yb in te_ld:
+        imgs=imgs.to(device)
+        fft_imgs=fft_features_batch(imgs)
+        out=ens(imgs,fft_imgs)
+        pr=torch.softmax(out,1)
+        preds.extend(out.argmax(1).cpu().numpy())
+        probs.extend(pr[:,FAKE_IDX].cpu().numpy())
+        labels.extend(yb.numpy())
+preds=np.array(preds); probs=np.array(probs); labels=np.array(labels)
+acc = (preds==labels).mean()*100
+auc = roc_auc_score(labels,probs)
+print(f"🎯 Accuracy: {acc:.2f}%  AUC: {auc:.4f}")
+print(classification_report(labels,preds,target_names=['REAL','FAKE']))
+
+# ── Charts ─────────────────────────────────────────────────
+fig,axes=plt.subplots(2,3,figsize=(18,10))
+fig.suptitle('DeepFake Detector — Results',fontsize=14,fontweight='bold')
+eps_p=range(1,len(h_px['tl'])+1); eps_f=range(1,len(h_fx['tl'])+1)
+for ax,hist,name in [(axes[0,0],h_px,'PixelCNN'),(axes[1,0],h_fx,'FreqCNN')]:
+    ep=range(1,len(hist['tl'])+1)
+    ax.plot(ep,hist['tl'],'b-o',ms=3,label='Train'); ax.plot(ep,hist['vl'],'r-o',ms=3,label='Val')
+    ax.set_title(f'{name} Loss'); ax.legend(); ax.grid(alpha=.3)
+for ax,hist,name in [(axes[0,1],h_px,'PixelCNN'),(axes[1,1],h_fx,'FreqCNN')]:
+    ep=range(1,len(hist['ta'])+1)
+    ax.plot(ep,hist['ta'],'b-o',ms=3,label='Train'); ax.plot(ep,hist['va'],'r-o',ms=3,label='Val')
+    ax.set_title(f'{name} Accuracy'); ax.legend(); ax.grid(alpha=.3)
+fpr,tpr,_=roc_curve(labels,probs)
+axes[0,2].plot(fpr,tpr,'b-',lw=2,label=f'AUC={auc:.3f}')
+axes[0,2].plot([0,1],[0,1],'r--',alpha=.5); axes[0,2].set_title('ROC Curve')
+axes[0,2].legend(); axes[0,2].grid(alpha=.3)
+cm=confusion_matrix(labels,preds)
+sns.heatmap(cm,annot=True,fmt='d',cmap='Blues',ax=axes[1,2],
+            xticklabels=['REAL','FAKE'],yticklabels=['REAL','FAKE'])
+axes[1,2].set_title('Confusion Matrix')
+plt.tight_layout(); plt.savefig('results/training.png',dpi=140,bbox_inches='tight'); plt.close()
+print("💾 results/training.png")
+
+# Confidence
+fig,ax=plt.subplots(figsize=(10,5))
+ax.hist(probs[labels==0],bins=30,color='green',alpha=.7,label='REAL')
+ax.hist(probs[labels==1],bins=30,color='red',  alpha=.7,label='FAKE')
+ax.set_title('Confidence Distribution'); ax.legend(); ax.grid(alpha=.3)
+ax.set_xlabel('P(FAKE)'); ax.set_ylabel('Count')
+plt.tight_layout(); plt.savefig('results/confidence.png',dpi=140,bbox_inches='tight'); plt.close()
+print("💾 results/confidence.png")
+
+json.dump(dict(accuracy=round(acc,4),auc=round(auc,4),
+               pixel_best=round(b_px,4),freq_best=round(b_fx,4),
+               ensemble_best=round(best_ens,4)),
+          open('results/results.json','w'),indent=2)
+
+print(f"\n{'═'*45}")
+print(f"🎉 Done!  Accuracy:{acc:.2f}%  AUC:{auc:.4f}")
+print(f"{'═'*45}")
